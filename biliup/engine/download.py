@@ -8,7 +8,6 @@ import time
 import stream_gears
 
 from biliup.config import config
-from biliup import common
 
 logger = logging.getLogger('biliup')
 
@@ -18,14 +17,18 @@ class DownloadBase:
         self.room_title = None
         if opt_args is None:
             opt_args = []
+            # 主播单独传参覆盖全局设置。例如新增了一个全局的filename_prefix参数，在下面添加self.filename_prefix = config.get('filename_prefix'),
+            # 即可通过self.filename_prefix在下载或者上传时候传递主播单独的设置参数用于调用（如果该主播有设置单独参数，将会优先使用单独参数；如无，则会优先你用全局参数。）
         self.fname = fname
         self.url = url
         self.suffix = suffix
         self.title = None
-        self.downloader = None
+        self.downloader = config.get('downloader', 'stream-gears')
         # ffmpeg.exe -i  http://vfile1.grtn.cn/2018/1542/0254/3368/154202543368.ssm/154202543368.m3u8
         # -c copy -bsf:a aac_adtstoasc -movflags +faststart output.mp4
         self.raw_stream_url = None
+        self.filename_prefix = config.get('filename_prefix')
+
         self.opt_args = opt_args
         self.fake_headers = {
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -39,18 +42,24 @@ class DownloadBase:
         ]
         if config.get('segment_time'):
             self.default_output_args += \
-                ['-segment_time', f"{config.get('segment_time') if config.get('segment_time') else '00:50:00'}"]
+                ['-segment_time', f"{config.get('segment_time', '00:50:00')}"]
         else:
             self.default_output_args += \
-                ['-fs', f"{config.get('file_size') if config.get('file_size') else '2621440000'}"]
+                ['-fs', f"{config.get('file_size', '2621440000')}"]
 
     def check_stream(self):
         logger.debug(self.fname)
         raise NotImplementedError()
 
     def download(self, filename):
+        if self.filename_prefix:  # 判断是否存在自定义录播命名设置
+            filename = (self.filename_prefix.format(streamer=self.fname, room_title=self.room_title).encode('unicode-escape').decode()).encode().decode("unicode-escape")
+        else:
+            filename = f'{self.fname}%Y-%m-%dT%H_%M_%S'
+        filename = get_valid_filename(filename)
         if self.downloader == 'stream-gears':
-            stream_gears_download(self.raw_stream_url, self.fake_headers, f'{self.fname}%Y-%m-%dT%H_%M_%S', config.get('segment_time'), config.get('file_size'))
+            stream_gears_download(self.raw_stream_url, self.fake_headers, filename, config.get('segment_time'),
+                                  config.get('file_size'))
         else:
             self.ffmpeg_download(filename)
 
@@ -61,10 +70,10 @@ class DownloadBase:
                 '-i', self.raw_stream_url, *self.default_output_args, *self.opt_args,
                 '-c', 'copy', '-f', self.suffix]
         if config.get('segment_time'):
-            args += ['-f', 'segment', f'{filename} part-%03d.{self.suffix}']
+            args += ['-f', 'segment', f'{(time.strftime(filename).encode("unicode-escape").decode()).encode().decode("unicode-escape")} part-%03d.{self.suffix}']
         else:
-            args += [f'{filename}.{self.suffix}.part']
-
+            args += [f'{(time.strftime(filename).encode("unicode-escape").decode()).encode().decode("unicode-escape")}.{self.suffix}']
+            
         proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         try:
             with proc.stdout as stdout:
@@ -91,7 +100,7 @@ class DownloadBase:
     def start(self):
         i = 0
         logger.info('开始下载%s：%s' % (self.__class__.__name__, self.fname))
-        date = common.time.now()
+        date = time.localtime()
         while i < 30:
             try:
                 ret = self.run()
@@ -141,6 +150,7 @@ class DownloadBase:
 def stream_gears_download(url, headers, file_name, segment_time=None, file_size=None):
     class Segment:
         pass
+
     segment = Segment()
     if segment_time:
         seg_time = segment_time.split(':')
@@ -168,8 +178,8 @@ def get_valid_filename(name):
     >>> get_valid_filename("{self.fname}%Y-%m-%dT%H_%M_%S")
     '{self.fname}%Y-%m-%dT%H_%M_%S'
     """
-    s = str(name).strip().replace(" ", "_")
-    s = re.sub(r"(?u)[^-\w.%{}\[\]【】]", "", s)
+    #s = str(name).strip().replace(" ", "_") #因为有些人会在主播名中间加入空格，为了避免和录播完毕自动改名冲突，所以注释掉
+    s = re.sub(r"(?u)[^-\w.%{}\[\]【】「」\s]", "", str(name))
     if s in {"", ".", ".."}:
         raise RuntimeError("Could not derive file name from '%s'" % name)
     return s
